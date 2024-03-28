@@ -30,7 +30,8 @@ static inline uintptr_t _ca_mem_align_forward(uintptr_t ptr, size_t align) {
 #elif defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
 #include <unistd.h>
 #include <sys/mman.h>
-#ifdef __APPLE__
+
+#if defined(__APPLE__) && defined(__aarch64__)
 #define CA_PAGE_SIZE (16 * 1024)
 #else
 #define CA_PAGE_SIZE (4 * 1024)
