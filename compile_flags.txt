@@ -1,3 +1,4 @@
+-I.
 -std=c99
 -D_DEFAULT_SOURCE
 -pedantic

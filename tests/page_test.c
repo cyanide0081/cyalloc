@@ -1,4 +1,4 @@
-#include "cyalloc.h"
+#include <cyalloc.h>
 #include <stdlib.h>
 
 int main(void) {

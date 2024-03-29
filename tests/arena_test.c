@@ -1,4 +1,4 @@
-#include "cyalloc.h"
+#include <cyalloc.h>
 
 int main(void) {
     const char *msg = "Hello, World!";
