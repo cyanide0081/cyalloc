@@ -16,11 +16,10 @@ static inline bool _ca_is_power_of_two(uintptr_t n) {
 static inline uintptr_t _ca_mem_align_forward(uintptr_t ptr, size_t align) {
     assert(_ca_is_power_of_two(align));
 
-    uintptr_t p = ptr, a = (uintptr_t)align;
-    uintptr_t mod = p & (a - 1);
-    if (mod) p += a - mod;
+    uintptr_t mod = ptr & (align - 1);
+    if (mod) ptr += align - mod;
 
-    return p;
+    return ptr;
 }
 
 /* ---------- Page Allocator Section ---------- */
@@ -99,7 +98,11 @@ static inline void page_free(void *ptr) {
 #endif
 }
 
-static inline void *page_realloc_align(void *ptr, size_t new_size, size_t align) {
+static inline void *page_realloc_align(
+    void *ptr,
+    size_t new_size,
+    size_t align
+) {
     PageChunk *chunk = (PageChunk*)((char*)ptr - sizeof(*chunk));
     const size_t new_aligned_size =
         _ca_mem_align_forward(new_size, align);
@@ -196,7 +199,11 @@ static inline Arena *arena_init_set_context(
     return arena;
 }
 
-static inline void *_ca_arena_alloc_align(Arena *arena, size_t bytes, size_t align) {
+static inline void *_ca_arena_alloc_align(
+    Arena *arena,
+    size_t bytes,
+    size_t align
+) {
     arena->pos = _ca_mem_align_forward(arena->pos, CA_DEFAULT_ALIGNMENT);
     if (arena->pos + bytes > arena->size) {
         /* need more memory! (make growable arena linked list) */

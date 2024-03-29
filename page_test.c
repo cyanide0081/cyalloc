@@ -1,4 +1,5 @@
 #include "cyalloc.h"
+#include <stdlib.h>
 
 int main(void) {
     const char *msg = "Lorem ipsum dolor sit amet, consectetur adipiscing elit,"
@@ -16,7 +17,7 @@ int main(void) {
     if (new_page == NULL) exit(EXIT_FAILURE);
 
     page = new_page;
-    printf("Allocated page[%luB]: '%s'\n", page_get_size(page), buf);
+    printf("Allocated page[%luB]: '%s'\n", _ca_page_get_size(page), buf);
 
     page_free(page);
     return 0;
