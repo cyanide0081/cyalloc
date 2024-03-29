@@ -35,40 +35,40 @@ static inline uintptr_t _ca_mem_align_forward(uintptr_t ptr, size_t align) {
 #else
 #define CA_PAGE_SIZE (4 * 1024)
 #endif /* __APPLE__ */
+#endif /* _WIN32 */
+
 
 typedef struct PageChunk {
-    size_t size;
-    size_t align;
+    size_t size;  // Total size of allocation (including aligned meta-chunk)
+    size_t align; // Alignment (for tracking down the start of the allocation)
 } PageChunk;
-#endif /* _WIN32 */
 
 static inline void *page_alloc_align(size_t size, size_t align) {
     assert(size > 0);
 
-    uintptr_t aligned_size = _ca_mem_align_forward((uintptr_t)size,
-        align > CA_PAGE_SIZE ? align : CA_PAGE_SIZE);
+    uintptr_t chunk_aligned_size =
+        _ca_mem_align_forward(sizeof(PageChunk), align);
+    uintptr_t aligned_size =
+        _ca_mem_align_forward((uintptr_t)size + chunk_aligned_size,
+            align > CA_PAGE_SIZE ? align : CA_PAGE_SIZE);
+    PageChunk chunk = { .size = aligned_size, .align = align };
 
+    void *mem = NULL;
 #ifdef _WIN32
-    return VirtualAlloc(NULL, aligned_size,
-        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    mem = VirtualAlloc(NULL, aligned_size,
+            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 #else
-    PageChunk chunk = { .align = align };
-    uintptr_t chunk_aligned_size = 
-        _ca_mem_align_forward(sizeof(chunk), align);
-    aligned_size = _ca_mem_align_forward((uintptr_t)size + chunk_aligned_size,
-        align > CA_PAGE_SIZE ? align : CA_PAGE_SIZE);
-    chunk.size = aligned_size;
+    mem = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANON, -1, 0);
+#endif /* _WIN32 */
 
-    void *mem = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANON, -1, 0);
     if (mem == NULL) return NULL;
 
     /* Append size of allocation to the area just before the first byte
-     * of aligned memory which will be handed to the caller at return  */
+     * of aligned memory which will be handed to the caller at return */
     memcpy((char*)mem + chunk_aligned_size - sizeof(chunk),
         &chunk, sizeof(chunk));
     return (void*)((char*)mem + chunk_aligned_size);
-#endif
 }
 
 /* Returns an allocated block of memory containing [size] bytes rounded
@@ -77,23 +77,23 @@ static inline void *page_alloc(size_t size) {
     return page_alloc_align(size, CA_DEFAULT_ALIGNMENT);
 }
 
-/* Returns the total size of the page reserved by the OS (including chunk) */
+/* Returns the total size of the page(s) reserved by the OS (including chunk) */
 static inline size_t _ca_page_get_size(void *ptr) {
     PageChunk *chunk = (PageChunk*)((char*)ptr - sizeof(*chunk));
     return chunk->size;
 }
 
-/* Immediately returns the memory pointed to by [ptr] back to the OS */
+/* Immediately returns the allocated memory starting @ [ptr] back to the OS */
 static inline void page_free(void *ptr) {
-#ifdef _WIN32
-    VirtualFree(ptr, 0, MEM_RELEASE);
-#else
     /* All allocated pages will have a metadata chunk right before the
      * beginning of the pointer that must be stepped back into
      * in order to free the whole block -> [*...[PageChunk][ptr]...] */
     PageChunk *chunk = (PageChunk*)((char*)ptr - sizeof(*chunk));
     const size_t chunk_aligned_size = 
         (size_t)_ca_mem_align_forward(sizeof(*chunk), chunk->align);
+#ifdef _WIN32
+    VirtualFree(ptr, 0, MEM_RELEASE);
+#else
     munmap((char*)ptr - chunk_aligned_size, chunk->size);
 #endif
 }
@@ -109,13 +109,19 @@ static inline void *page_realloc_align(
     const size_t current_size = _ca_page_get_size(ptr);
     const size_t chunk_aligned_size = 
         (size_t)_ca_mem_align_forward(sizeof(*chunk), chunk->align);
-    /* TODO: free excess pages if possible */
-    if (new_aligned_size + chunk_aligned_size <= current_size) return ptr;
+
+    /* TODO: free excess pages if possible
+     * (free memory) starting at
+     * (current_size - new_aligned_size + chunk_aligned_size) */
+    if (new_aligned_size + chunk_aligned_size <= current_size) {
+        return ptr;
+
+    }
     
     void *new_ptr = page_alloc(new_aligned_size);
     if (new_ptr == NULL) return NULL;
 
-    memcpy(new_ptr, ptr, current_size - sizeof(*chunk));
+    memcpy(new_ptr, ptr, current_size - chunk_aligned_size);
     page_free(ptr);
     return new_ptr;
 }
@@ -172,7 +178,7 @@ static inline Arena *arena_init(
         return NULL;
     }
     
-    Arena *arena = (Arena*)backing_allocator(sizeof(*arena) + initial_size);
+    Arena *arena = backing_allocator(sizeof(*arena) + initial_size);
     if (arena == NULL) {
         fprintf(stderr, "FATAL: unable to initialize arena of %zuB\n",
             initial_size);
@@ -280,9 +286,9 @@ static inline void arena_flush(void) {
 /* Returns allocated space in the current context arena containing a copy of
  * (len) bytes of the given string (null terminator is appended) */
 static inline char *arena_alloc_string(const char *str, size_t len) {
-    char *s = (char*)arena_alloc((len + 1) * sizeof(char));
+    char *s = arena_alloc((len + 1) * sizeof(char));
     s[len] = '\0';
-    return (char*)memcpy(s, str, len);
+    return memcpy(s, str, len);
 }
 
 /* Returns allocated space in the current context arena containing a copy of
@@ -298,7 +304,7 @@ static inline char *arena_alloc_c_string(const char *str) {
     return buf;
 }
 
-//
+// TODO: remake this
 // static inline char *ArenaSprintf(Arena *arena, const char *format, ...) {
 //     va_list args;
 //     va_start(args, format);
