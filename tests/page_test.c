@@ -18,7 +18,7 @@ int main(void) {
     char *txt_buf = page_alloc(txt_len + 1);
     fread(txt_buf, sizeof(char), txt_len, f);
 
-    printf("Allocated message[%luB]: '%s' (page size: %zuB)\n",
+    printf("Allocated message[%zuB]: '%s' (page size: %zuB)\n",
         txt_len, txt_buf, _ca_page_get_size(txt_buf));
     void *new_buf = page_realloc(txt_buf, 0x80);
     if (new_buf == NULL) {

@@ -83,15 +83,16 @@ static inline size_t _ca_page_get_size(void *ptr) {
 
 /* Immediately returns the allocated memory starting @ [ptr] back to the OS */
 static inline void page_free(void *ptr) {
+#ifdef _WIN32
+    VirtualFree(ptr, 0, MEM_RELEASE);
+#else
     /* All allocated pages will have a metadata chunk right before the
      * beginning of the pointer that must be stepped back into
      * in order to free the whole block -> [*...[PageChunk][ptr]...] */
     PageChunk *chunk = (PageChunk*)((char*)ptr - sizeof(*chunk));
     const size_t chunk_aligned_size = 
-        (size_t)_ca_mem_align_forward(sizeof(*chunk), chunk->align);
-#ifdef _WIN32
-    VirtualFree(ptr, 0, MEM_RELEASE);
-#else
+        _ca_mem_align_forward(sizeof(*chunk), chunk->align);
+
     munmap((char*)ptr - chunk_aligned_size, chunk->size);
 #endif
 }
@@ -114,11 +115,12 @@ static inline void *page_realloc_align(
      * (free memory) starting at
      * (current_size - new_aligned_size + chunk_aligned_size) */
     if (new_page_aligned_size <= current_size) {
+        size_t chunk_to_free = current_size - new_size - chunk_aligned_size;
+
 #ifdef _WIN32
-        assert(0 && "not implemented!!!");
+        VirtualFree((char*)ptr + new_size, chunk_to_free, MEM_RELEASE);
 #else
-        munmap((char*)ptr + new_size,
-            current_size - new_size - chunk_aligned_size);
+        munmap((char*)ptr + new_size, chunk_to_free);
 #endif
 
         chunk->size = new_page_aligned_size;
