@@ -41,6 +41,12 @@ typedef struct PageChunk {
     size_t align; // Alignment (for tracking down the start of the allocation)
 } PageChunk;
 
+/* Returns the total size of the page(s) reserved by the OS (including chunk) */
+static inline size_t _ca_page_aligned_size(void *ptr) {
+    PageChunk *chunk = (PageChunk*)((char*)ptr - sizeof(*chunk));
+    return chunk->size;
+}
+
 static inline void *page_alloc_align(size_t size, size_t align) {
     assert(size > 0);
 
@@ -54,10 +60,10 @@ static inline void *page_alloc_align(size_t size, size_t align) {
     void *mem = NULL;
 #ifdef _WIN32
     mem = VirtualAlloc(NULL, aligned_size,
-            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 #else
     mem = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANON, -1, 0);
+        MAP_PRIVATE | MAP_ANON, -1, 0);
 #endif /* _WIN32 */
 
     if (mem == NULL) return NULL;
@@ -73,12 +79,6 @@ static inline void *page_alloc_align(size_t size, size_t align) {
  * up to a multiple of the system's page size (with default alignment) */
 static inline void *page_alloc(size_t size) {
     return page_alloc_align(size, CA_DEFAULT_ALIGNMENT);
-}
-
-/* Returns the total size of the page(s) reserved by the OS (including chunk) */
-static inline size_t _ca_page_get_size(void *ptr) {
-    PageChunk *chunk = (PageChunk*)((char*)ptr - sizeof(*chunk));
-    return chunk->size;
 }
 
 /* Immediately returns the allocated memory starting @ [ptr] back to the OS */
@@ -142,6 +142,12 @@ static inline void *page_realloc_align(
  * DOESN'T free the block pointed to by [ptr] */
 static inline void *page_realloc(void *ptr, size_t new_size) {
     return page_realloc_align(ptr, new_size, CA_DEFAULT_ALIGNMENT);
+}
+
+/* Returns the allocation size that was given to page_alloc/page_realloc */
+static inline size_t page_get_size(void *ptr) {
+    PageChunk *chunk = (PageChunk*)((char*)ptr - sizeof(*chunk));
+    return chunk->size - _ca_mem_align_forward(chunk->size, chunk->align);
 }
 
 /* ---------- Arena Allocator Section ---------- */
