@@ -147,7 +147,7 @@ static inline void *page_realloc(void *ptr, size_t new_size) {
 /* Returns the allocation size that was given to page_alloc/page_realloc */
 static inline size_t page_get_size(void *ptr) {
     PageChunk *chunk = (PageChunk*)((char*)ptr - sizeof(*chunk));
-    return chunk->size - _ca_mem_align_forward(chunk->size, chunk->align);
+    return chunk->size - _ca_mem_align_forward(sizeof(*chunk), chunk->align);
 }
 
 /* ---------- Arena Allocator Section ---------- */

@@ -18,8 +18,8 @@ int main(void) {
     char *txt_buf = page_alloc(txt_len + 1);
     fread(txt_buf, sizeof(char), txt_len, f);
 
-    printf("Allocated message[%zuB]: '%s' (page size: %zuB)\n",
-        txt_len, txt_buf, page_get_size(txt_buf));
+    printf("Successfully allocated message (%zuB) (page size: %zuB)\n",
+        txt_len, page_get_size(txt_buf));
     void *new_buf = page_realloc(txt_buf, 0x80);
     if (new_buf == NULL) {
         fprintf(stderr, "ERROR: unable to shrink page size: %s\n",
@@ -29,8 +29,7 @@ int main(void) {
 
     txt_buf = new_buf;
 
-    printf("Successfully shrunk buf size to %zuB\n",
-        page_get_size(txt_buf));
+    printf("Successfully shrunk page size: (%zuB)\n", page_get_size(txt_buf));
     page_free(txt_buf);
     fclose(f);
 
