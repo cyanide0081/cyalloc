@@ -17,9 +17,7 @@ static inline uintptr_t _ca_mem_align_forward(uintptr_t ptr, size_t align) {
     assert(_ca_is_power_of_two(align));
 
     uintptr_t mod = ptr & (align - 1);
-    if (mod) ptr += align - mod;
-
-    return ptr;
+    return mod ? ptr + align - mod : ptr;
 }
 
 /* ---------- Page Allocator Section ---------- */
@@ -104,25 +102,35 @@ static inline void *page_realloc_align(
     size_t align
 ) {
     PageChunk *chunk = (PageChunk*)((char*)ptr - sizeof(*chunk));
-    const size_t new_aligned_size =
-        _ca_mem_align_forward(new_size, align);
-    const size_t current_size = _ca_page_get_size(ptr);
-    const size_t chunk_aligned_size = 
-        (size_t)_ca_mem_align_forward(sizeof(*chunk), chunk->align);
+
+    const size_t current_size = chunk->size;
+    const size_t new_aligned_size = _ca_mem_align_forward(new_size, align);
+    const size_t chunk_aligned_size =
+        _ca_mem_align_forward(sizeof(*chunk), chunk->align);
+    const size_t new_page_aligned_size = _ca_mem_align_forward(
+        new_aligned_size + chunk_aligned_size, CA_PAGE_SIZE);
 
     /* TODO: free excess pages if possible
      * (free memory) starting at
      * (current_size - new_aligned_size + chunk_aligned_size) */
-    if (new_aligned_size + chunk_aligned_size <= current_size) {
-        return ptr;
+    if (new_page_aligned_size <= current_size) {
+#ifdef _WIN32
+        assert(0 && "not implemented!!!");
+#else
+        munmap((char*)ptr + new_size,
+            current_size - new_size - chunk_aligned_size);
+#endif
 
+        chunk->size = new_page_aligned_size;
+        return ptr;
     }
-    
+
     void *new_ptr = page_alloc(new_aligned_size);
     if (new_ptr == NULL) return NULL;
 
     memcpy(new_ptr, ptr, current_size - chunk_aligned_size);
     page_free(ptr);
+
     return new_ptr;
 }
 
@@ -177,7 +185,7 @@ static inline Arena *arena_init(
             " to arena allocator.\n");
         return NULL;
     }
-    
+
     Arena *arena = backing_allocator(sizeof(*arena) + initial_size);
     if (arena == NULL) {
         fprintf(stderr, "FATAL: unable to initialize arena of %zuB\n",
@@ -273,7 +281,7 @@ static inline Arena *arena_deinit(void) {
  * clears all of its space to zero */
 static inline void arena_flush(void) {
     if (context == NULL) return;
-    
+
     if (context->next != NULL) {
         _ca_arena_deinit(context->next);
     }

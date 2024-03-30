@@ -1,24 +1,38 @@
 #include <cyalloc.h>
 #include <stdlib.h>
+#include <errno.h>
 
 int main(void) {
-    const char *msg = "Lorem ipsum dolor sit amet, consectetur adipiscing elit,"
-        " sed do eiusmod tempor incididunt ut labore et dolore magna aliqua."
-        " Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris"
-        " nisi ut aliquip ex ea commodo consequat.";
-    size_t msg_len = strlen(msg);
+    printf("Testing Page Allocator...\n");
 
-    void *page = page_alloc(0x100);
-    assert(msg_len < 0x100);
-    char *buf = memcpy(page, msg, strlen(msg));
+    FILE *f = fopen("tests/sample.txt", "r");
+    if (f == NULL) {
+        fprintf(stderr, "ERROR: unable to open file: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
 
-    printf("Allocated message[%luB]: '%s'\n", strlen(buf), buf);
-    void *new_page = page_realloc(page, 0x80);
-    if (new_page == NULL) exit(EXIT_FAILURE);
+    fseek(f, 0, SEEK_END);
+    size_t txt_len = ftell(f);
+    rewind(f);
 
-    page = new_page;
-    printf("Allocated page[%luB]: '%s'\n", _ca_page_get_size(page), buf);
+    char *txt_buf = page_alloc(txt_len + 1);
+    fread(txt_buf, sizeof(char), txt_len, f);
 
-    page_free(page);
+    printf("Allocated message[%luB]: '%s' (page size: %zuB)\n",
+        txt_len, txt_buf, _ca_page_get_size(txt_buf));
+    void *new_buf = page_realloc(txt_buf, 0x80);
+    if (new_buf == NULL) {
+        fprintf(stderr, "ERROR: unable to shrink page size: %s\n",
+             strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    txt_buf = new_buf;
+
+    printf("Successfully shrunk buf size to %zuB\n",
+        _ca_page_get_size(txt_buf));
+    page_free(txt_buf);
+    fclose(f);
+
     return 0;
 }
