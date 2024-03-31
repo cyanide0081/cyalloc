@@ -4,6 +4,7 @@
 #include <stdio.h>   // for optional logging
 #include <stdint.h>  // uintptr_t and size_t
 #include <stdbool.h> // bool
+#include <stdarg.h>  // va_args
 #include <string.h>  // memcpy and memset
 #include <assert.h>  // assertions
 
@@ -154,7 +155,8 @@ static inline size_t page_get_size(void *ptr) {
 typedef struct Arena {
     unsigned char *buf;     // actual arena memory
     size_t size;            // size of the buffer in bytes
-    size_t pos;             // offset to first byte of (unaligned) free memory
+    size_t offset;          // offset to first byte of (unaligned) free memory
+    size_t prev_offset;     // offset to first byte of previous allocation
     struct Arena *next;     // pointer to next arena (linked-list of arenas)
     void *(*alloc)(size_t); // backing allocator
     void (*free)(void*);    // backing deallocator
@@ -226,8 +228,10 @@ static inline void *_ca_arena_alloc_align(
     size_t bytes,
     size_t align
 ) {
-    arena->pos = _ca_mem_align_forward(arena->pos, CA_DEFAULT_ALIGNMENT);
-    if (arena->pos + bytes > arena->size) {
+    uintptr_t buf = (uintptr_t)arena->buf, curr_ptr = buf - arena->offset;
+    uintptr_t offset =
+        _ca_mem_align_forward(curr_ptr, CA_DEFAULT_ALIGNMENT) - buf;
+    if (offset + bytes > arena->size) {
         /* need more memory! (make growable arena linked list) */
         if (arena->next == NULL) {
             size_t new_size = (size_t)(arena->size * CA_ARENA_GROWTH_FACTOR);
@@ -239,19 +243,19 @@ static inline void *_ca_arena_alloc_align(
             }
 
 #ifdef CA_LOGGING
-            fprintf(stderr, "ALLOCATING: new arena of %zuB...\n\n", new_size);
+            fprintf(stderr, "ALLOCATING: new arena of %zuB...\n", new_size);
 #endif
             arena->next = arena_init(new_size, arena->alloc, arena->free);
-            return _ca_arena_alloc_align(arena->next, bytes, align);
+            return _ca_arena_alloc_align(arena->next,bytes, align);
         }
 
         return _ca_arena_alloc_align(arena->next, bytes, align);
     }
 
-    size_t pos = arena->pos;
-    arena->pos += bytes;
+    arena->prev_offset = offset;
+    arena->offset = offset + bytes;
 
-    return (void*)(arena->buf + pos);
+    return (void*)(arena->buf + offset);
 }
 
 static inline void *arena_alloc_align(size_t bytes, size_t alignment) {
@@ -278,6 +282,64 @@ static inline void _ca_arena_deinit(Arena *arena) {
     arena->free(arena);
 }
 
+/* Resizes the last allocation done in the arena (if [old_memory] doesn't match
+ * the return value of the last allocation done in [arena], this function
+ * returns NULL) */
+static inline void *_ca_arena_realloc_align(
+    Arena *arena,
+    void *old_memory,
+    size_t old_size,
+    size_t new_size,
+    size_t align
+) {
+    assert(_ca_is_power_of_two(align));
+
+    unsigned char *old_mem = old_memory;
+    if (old_mem == NULL || old_size == 0) {
+        return _ca_arena_alloc_align(arena, new_size, align);
+    }
+
+    while (arena->next != NULL) arena = arena->next;
+
+    if (arena->buf + arena->prev_offset != old_mem) return NULL;
+
+    size_t aligned_size = _ca_mem_align_forward(new_size, align);
+    if (old_mem + aligned_size < arena->buf + arena->size) {
+        arena->offset = arena->prev_offset + aligned_size; 
+        if (aligned_size < old_size) {
+            memset(arena->buf + arena->offset, 0, old_size - aligned_size);
+        }
+
+        return old_memory;
+    }
+
+    void *new_memory = _ca_arena_alloc_align(arena, new_size, align);
+    if (new_memory == NULL) return NULL;
+    
+    size_t copy_size = old_size < new_size ? old_size : new_size;
+    memmove(new_memory, old_memory, copy_size);
+    return new_memory;
+}
+
+static inline void *arena_realloc_align(
+    void *old_memory,
+    size_t old_size,
+    size_t new_size,
+    size_t align
+) {
+    return _ca_arena_realloc_align(context, old_memory,
+        old_size, new_size, align);
+}
+
+static inline void *arena_realloc(
+    void *old_memory,
+    size_t old_size,
+    size_t new_size
+) {
+    return arena_realloc_align(old_memory,
+        old_size, new_size, CA_DEFAULT_ALIGNMENT);
+}
+
 /* Frees all resources allocated by the arena, including itself */
 static inline Arena *arena_deinit(void) {
     _ca_arena_deinit(context);
@@ -294,7 +356,7 @@ static inline void arena_flush(void) {
         _ca_arena_deinit(context->next);
     }
 
-    context->pos = 0;
+    context->offset = 0;
     context->next = NULL;
     memset(context->buf, 0, context->size);
 }
@@ -320,20 +382,25 @@ static inline char *arena_alloc_c_string(const char *str) {
     return buf;
 }
 
-// TODO: remake this
-// static inline char *ArenaSprintf(Arena *arena, const char *format, ...) {
-//     va_list args;
-//     va_start(args, format);
-//     size_t bytes = vsnprintf(NULL, 0 , format, args) + 1;
-//     char *s = ArenaPush(arena, bytes * sizeof(char));
-//     va_end(args);
-// 
-//     va_start(args, format);
-//     vsprintf(s, format, args);
-//     va_end(args);
-// 
-//     return s;
-// }
-// 
+/* Returns a pointer to the first character of an allocated string inside
+ * [arena] with a format defined by [fmt] */
+static inline char *_ca_arena_sprintf(Arena *arena, const char *fmt, ...) {
+    if (arena == NULL) arena = context;
+
+    va_list args;
+    va_start(args, fmt);
+    size_t bytes = vsnprintf(NULL, 0 , fmt, args) + 1;
+    char *s = _ca_arena_alloc_align(arena, bytes, CA_DEFAULT_ALIGNMENT);
+    if (s == NULL) return NULL;
+    
+    va_end(args);
+    va_start(args, fmt);
+    vsprintf(s, fmt, args);
+    va_end(args);
+
+    return s;
+}
+
+#define arena_sprintf(fmt, ...) _ca_arena_sprintf(NULL, fmt, __VA_ARGS__)
 
 #endif /* _CYALLOC_H */
