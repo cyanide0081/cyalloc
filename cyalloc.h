@@ -228,23 +228,15 @@ static inline void *_ca_arena_alloc_align(
     size_t bytes,
     size_t align
 ) {
-    uintptr_t buf = (uintptr_t)arena->buf, curr_ptr = buf - arena->offset;
+    uintptr_t buf = (uintptr_t)arena->buf, curr_ptr = buf + arena->offset;
     uintptr_t offset =
         _ca_mem_align_forward(curr_ptr, CA_DEFAULT_ALIGNMENT) - buf;
     if (offset + bytes > arena->size) {
         /* need more memory! (make growable arena linked list) */
         if (arena->next == NULL) {
             size_t new_size = (size_t)(arena->size * CA_ARENA_GROWTH_FACTOR);
-            if (bytes > new_size) {
-                fprintf(stderr,
-                    "FATAL: requested block won't fit in a single arena!"
-                    " (Block: %zuB, Arena: %zuB)\n", bytes, arena->size);
-                return NULL;
-            }
+            if (bytes > new_size) new_size = _ca_mem_align_forward(bytes, CA_PAGE_SIZE);
 
-#ifdef CA_LOGGING
-            fprintf(stderr, "ALLOCATING: new arena of %zuB...\n", new_size);
-#endif
             arena->next = arena_init(new_size, arena->alloc, arena->free);
             return _ca_arena_alloc_align(arena->next,bytes, align);
         }
