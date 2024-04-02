@@ -235,7 +235,9 @@ static inline void *_ca_arena_alloc_align(
         /* need more memory! (make growable arena linked list) */
         if (arena->next == NULL) {
             size_t new_size = (size_t)(arena->size * CA_ARENA_GROWTH_FACTOR);
-            if (bytes > new_size) new_size = _ca_mem_align_forward(bytes, CA_PAGE_SIZE);
+            if (bytes > new_size) {
+                new_size = _ca_mem_align_forward(bytes, CA_PAGE_SIZE);
+            }
 
             arena->next = arena_init(new_size, arena->alloc, arena->free);
             return _ca_arena_alloc_align(arena->next,bytes, align);
@@ -266,10 +268,6 @@ static inline void _ca_arena_deinit(Arena *arena) {
     if (arena->next != NULL) {
         _ca_arena_deinit(arena->next);
     }
-
-#ifdef CA_LOGGING
-    fprintf(stderr, "RELEASING: arena @ 0x%p...\n\n", (void*)arena->buf);
-#endif
 
     arena->free(arena);
 }
@@ -379,16 +377,18 @@ static inline char *arena_alloc_c_string(const char *str) {
 static inline char *_ca_arena_sprintf(Arena *arena, const char *fmt, ...) {
     if (arena == NULL) arena = context;
 
-    va_list args;
+    va_list args, args2;
     va_start(args, fmt);
+    va_copy(args2, args);
+
     size_t bytes = vsnprintf(NULL, 0 , fmt, args) + 1;
+    va_end(args);
+
     char *s = _ca_arena_alloc_align(arena, bytes, CA_DEFAULT_ALIGNMENT);
     if (s == NULL) return NULL;
-    
-    va_end(args);
-    va_start(args, fmt);
-    vsprintf(s, fmt, args);
-    va_end(args);
+
+    vsprintf(s, fmt, args2);
+    va_end(args2);
 
     return s;
 }

@@ -1,4 +1,3 @@
-#define CA_LOGGING
 #include <cyalloc.h>
 #include <stdlib.h>
 #include <errno.h>
