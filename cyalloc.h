@@ -7,6 +7,7 @@
 #include <stdarg.h>  // va_args
 #include <string.h>  // memcpy and memset
 #include <assert.h>  // assertions
+#include <math.h>
 
 #define CA_DEFAULT_ALIGNMENT (2 * sizeof(void*))
 
@@ -19,6 +20,27 @@ static inline uintptr_t _ca_mem_align_forward(uintptr_t ptr, size_t align) {
 
     uintptr_t mod = ptr & (align - 1);
     return mod ? ptr + align - mod : ptr;
+}
+
+/* Aligns a pointer forward accounting for both the size
+ * of a header and the alignment */
+static inline size_t _ca_calc_header_padding(
+    uintptr_t ptr,
+    size_t align,
+    size_t header_size
+) {
+    assert(_ca_is_power_of_two(align));
+
+    uintptr_t a = (uintptr_t)align;
+    uintptr_t mod = ptr & (a - 1);
+    uintptr_t padding = mod ? a - mod : 0;
+    if (padding < (uintptr_t)header_size) {
+        uintptr_t needed_space = header_size - padding;
+        padding += (needed_space & (a - 1)) ?
+            a * (needed_space / a + 1) : a * (needed_space / a);
+    }
+
+    return (size_t)padding;
 }
 
 /* ---------- Page Allocator Section ---------- */
@@ -35,7 +57,6 @@ static inline uintptr_t _ca_mem_align_forward(uintptr_t ptr, size_t align) {
 #define CA_PAGE_SIZE (4 * 1024)
 #endif /* __APPLE__ */
 #endif /* _WIN32 */
-
 
 typedef struct PageChunk {
     size_t size;  // Total size of allocation (including aligned meta-chunk)
@@ -69,10 +90,13 @@ static inline void *page_alloc_align(size_t size, size_t align) {
 
     if (mem == NULL) return NULL;
 
+    assert((uintptr_t)mem == _ca_mem_align_forward((uintptr_t)mem, align));
+
     /* Append size of allocation to the area just before the first byte
      * of aligned memory which will be handed to the caller at return */
     memcpy((char*)mem + chunk_aligned_size - sizeof(chunk),
         &chunk, sizeof(chunk));
+
     return (void*)((char*)mem + chunk_aligned_size);
 }
 
@@ -162,7 +186,7 @@ typedef struct ArenaNode {
 
 typedef struct ArenaState {
     ArenaNode *first_node;
-    size_t end_index;       // not yet sure what this'll be used for
+    size_t end_index;       // NOTE: not yet sure what this'll be used for
 } ArenaState;
 
 typedef struct Arena {
@@ -172,14 +196,15 @@ typedef struct Arena {
 } Arena;
 
 /* TODO: 
- *  1. move the arena configuration state into a new ArenaState struct which
- *     will also store the linked list of buffers allocated using the backing
- *     allocator
+ *  1. create an internal stripped-off linked-list implementation that inserts
+ *     new nodes at the beginning of the list for better performance
  */
 
 /* Default initial size set to one page */
 #define CA_ARENA_INIT_SIZE     CA_PAGE_SIZE
 #define CA_ARENA_GROWTH_FACTOR 2.0
+#define CA_ARENA_STRUCTS_SIZE \
+    (sizeof(Arena) + sizeof(ArenaState) + sizeof(ArenaNode))
 
 /* Returns an initialized Arena struct with a capacity of initial_size
  * takes in a backing allocator and deallocator complying to the standard
@@ -189,17 +214,18 @@ static inline Arena *arena_init(
     void *(*backing_allocator)(size_t),
     void (*backing_deallocator)(void*)
 ) {
-    if (initial_size == 0) initial_size = CA_ARENA_INIT_SIZE;
-
+    size_t default_size = CA_ARENA_INIT_SIZE;
     if (backing_allocator == NULL && backing_deallocator == NULL) {
         backing_allocator = page_alloc;
-        backing_deallocator = page_free; 
+        backing_deallocator = page_free;
+        default_size -= sizeof(PageChunk) + CA_ARENA_STRUCTS_SIZE;
     } else if (backing_allocator == NULL || backing_deallocator == NULL) {
         return NULL;
     }
 
-    size_t size = sizeof(Arena) + sizeof(ArenaState) +
-        sizeof(ArenaNode) + initial_size;
+    if (initial_size == 0) initial_size = default_size;
+
+    size_t size = CA_ARENA_STRUCTS_SIZE + initial_size;
     Arena *arena = backing_allocator(size);
     if (arena == NULL) return NULL;
 
@@ -210,7 +236,7 @@ static inline Arena *arena_init(
     arena->state->first_node = (ArenaNode*)(arena->state + 1);
 
     ArenaNode *first_node = arena->state->first_node;
-    first_node->buf = (unsigned char*)(arena->state->first_node + 1); 
+    first_node->buf = (unsigned char*)(first_node + 1); 
     first_node->size = initial_size;
 
     return arena;
@@ -389,20 +415,34 @@ static inline char *arena_sprintf(Arena *arena, const char *fmt, ...) {
 }
 
 /* ---------- Stack Allocator Section ---------- */
-typedef struct Stack {
+typedef struct StackNode {
     unsigned char *buf;
     size_t size;
+    size_t prev_offset;
     size_t offset;
-    struct Stack *next;
+    struct StackNode *next;
+} StackNode;
+
+typedef struct StackState {
+    StackNode *first_node;
+} StackState;
+
+typedef struct Stack {
     void *(*alloc)(size_t);
     void (*free)(void*);
+    StackState *state;
 } Stack;
 
 typedef struct StackHeader {
+    size_t prev_offset;
     size_t padding;
 } StackHeader;
 
-#define CA_STACK_INIT_SIZE CA_PAGE_SIZE
+/* Default initial size set to one page */
+#define CA_STACK_INIT_SIZE     CA_PAGE_SIZE
+#define CA_STACK_GROWTH_FACTOR 2.0
+#define CA_STACK_STRUCTS_SIZE \
+    (sizeof(Stack) + sizeof(StackState) + sizeof(StackNode))
 
 static inline Stack *stack_init( 
     size_t initial_size,
@@ -418,42 +458,171 @@ static inline Stack *stack_init(
         return NULL;
     }
 
-    Stack *stack = backing_allocator(sizeof(*stack) + initial_size);
+    size_t size = CA_STACK_STRUCTS_SIZE + initial_size;
+    Stack *stack = backing_allocator(size);
     if (stack == NULL) return NULL;
 
-    stack->buf = (unsigned char*)(stack + 1); 
     stack->alloc = backing_allocator;
     stack->free = backing_deallocator;
-    stack->size = initial_size;
+    stack->state = (StackState*)(stack + 1);
+
+    stack->state->first_node = (StackNode*)(stack->state + 1);
+
+    StackNode *first_node = stack->state->first_node;
+    first_node->buf = (unsigned char*)(first_node + 1);
+    first_node->size = initial_size;
 
     return stack;
 }
 
-/* Aligns a pointer forward accounting for both the size
- * of a header and the alignment */
-static inline size_t _ca_get_header_padding(
-    uintptr_t ptr,
-    uintptr_t align,
-    size_t header_size
-) {
-    assert(_ca_is_power_of_two(align));
+static inline StackNode *_ca_stack_insert_node(Stack *stack, size_t size) {
+    if (stack == NULL) return NULL;
+    
+    StackNode *cur_node = stack->state->first_node;
+    size_t new_node_size = sizeof(*cur_node) + size;
+    StackNode *new_node = stack->alloc(new_node_size);
+    if (new_node == NULL) return NULL;
 
-    uintptr_t a = align;
-    uintptr_t mod = ptr & (a - 1);
-    uintptr_t padding = mod ? a - mod : 0;
-    uintptr_t needed_space = (uintptr_t)header_size;
-    if (padding < needed_space) {
-        needed_space -= padding;
-        padding += (needed_space & (a - 1)) ?
-            a * (needed_space / a + 1) : a * (needed_space / a);
-    }
+    new_node->buf = (unsigned char*)(new_node + 1);
+    new_node->size = size;
+    new_node->next = stack->state->first_node;
+    stack->state->first_node = new_node;
 
-    return (size_t)padding;
+    return cur_node;
 }
 
 void *stack_alloc_align(Stack *stack, size_t size, size_t align) {
-    (void)stack,(void)size,(void)align;
-    return NULL;
+    StackHeader *header;    
+    StackNode *cur_node = stack->state->first_node;
+    uintptr_t cur_address = (uintptr_t)(cur_node->buf + cur_node->offset);
+    size_t padding = _ca_calc_header_padding(cur_address,
+        align, sizeof(*header));
+    size_t alloc_size = padding + size;
+    if (cur_node->offset + padding + size > cur_node->size) {
+        /* out of memory (TODO: implement finished linked-list stack logic) */
+        size_t node_size = cur_node->size * CA_STACK_GROWTH_FACTOR;
+        if (node_size < alloc_size)
+            node_size = _ca_mem_align_forward(alloc_size, CA_PAGE_SIZE);
+
+        cur_node = _ca_stack_insert_node(stack, node_size);
+        if (cur_node == NULL) return NULL;
+        
+        cur_address = (uintptr_t)(cur_node->buf + cur_node->offset);
+        padding = _ca_calc_header_padding(cur_address, align, sizeof(*header));
+    }
+
+    uintptr_t next_address = cur_address + (uintptr_t)padding;
+    header = (StackHeader*)(next_address - sizeof(*header));
+    header->padding = (uint8_t)padding;
+    header->prev_offset = cur_node->offset;
+
+    cur_node->prev_offset = header->prev_offset;
+    cur_node->offset += alloc_size;
+
+    return (void*)next_address;
 }
 
+void *stack_alloc(Stack *stack, size_t size) {
+    return stack_alloc_align(stack, size, CA_DEFAULT_ALIGNMENT);
+}
+
+void stack_free(Stack *stack, void *ptr) {
+    if (ptr == NULL) return;
+
+    StackNode *cur_node = stack->state->first_node;
+    uintptr_t start = (uintptr_t)cur_node->buf;
+    uintptr_t end = start + (uintptr_t)cur_node->size;
+    uintptr_t cur_address = (uintptr_t)ptr;
+    if (!(start <= cur_address && cur_address < end)) {
+        /* out of bounds */
+        return;
+    }
+    if (cur_address >= start + (uintptr_t)cur_node->offset) {
+        /* double-free */
+        return;
+    }
+
+    StackHeader *header = (StackHeader*)(cur_address - sizeof(*header));
+    size_t prev_offset = (size_t)(cur_address - header->padding - start);
+    cur_node->offset = prev_offset;
+    cur_node->prev_offset = header->prev_offset;
+}
+
+void *stack_realloc_align(
+    Stack *stack,
+    void *ptr,
+    size_t old_size,
+    size_t new_size,
+    size_t align
+) {
+    if (ptr == NULL) {
+        return stack_alloc_align(stack, new_size, CA_DEFAULT_ALIGNMENT);
+    } else if (new_size == 0) {
+        stack_free(stack, ptr);
+        return NULL;
+    }
+
+    StackNode *cur_node = stack->state->first_node;
+    uintptr_t start = (uintptr_t)cur_node->buf;
+    uintptr_t end = start + cur_node->size;
+    uintptr_t cur_address = (uintptr_t)ptr;
+    if (!(start <= cur_address && cur_address < end)) {
+        /* out of bounds */
+        return NULL;
+    }
+    if (cur_address >= start + (uintptr_t)cur_node->offset) {
+        /* not the last allocation */
+        return NULL;
+    }
+
+    StackHeader *header = (StackHeader*)(cur_address - sizeof(*header));
+    uintptr_t cur_padding = header->padding;
+    uintptr_t alloc_start = (uintptr_t)header - cur_padding;
+    uintptr_t new_padding =
+        _ca_calc_header_padding(alloc_start, align, sizeof(*header));
+    if (new_size <= old_size && new_padding == cur_padding) {
+        cur_node->offset -= old_size - new_size;
+        return ptr;
+    }
+
+    size_t prev_offset = (size_t)(cur_address - header->padding - start);
+    size_t new_offset = (size_t)(alloc_start + new_padding + new_size - start);
+    if (new_offset <= end) {
+        uintptr_t new_address = alloc_start + new_padding;        
+        size_t min_size = old_size < new_size ? old_size : new_size;
+        memmove((void*)new_address, ptr, min_size);
+
+        header = (StackHeader*)(new_address - sizeof(*header));
+        header->padding = new_padding;
+        header->prev_offset = prev_offset;
+        cur_node->offset = new_offset;
+
+        return (void*)new_address;
+    }
+
+    void *new_ptr = stack_alloc_align(stack, new_size, align);
+    memmove(new_ptr, ptr, old_size < new_size ? old_size : new_size);
+
+    cur_node->offset = prev_offset;
+    cur_node->prev_offset = header->prev_offset;
+    
+    return new_ptr;
+}
+ 
+void *stack_realloc(Stack *stack, void *ptr, size_t old_size, size_t new_size) {
+    return stack_realloc_align(stack, ptr,
+        old_size, new_size, CA_DEFAULT_ALIGNMENT);
+}
+
+void stack_deinit(Stack *stack) {
+    StackNode *cur_node = stack->state->first_node, *next = cur_node->next;
+    while (cur_node != NULL) {
+        stack->free(cur_node);
+        cur_node = next;
+        next = next->next;
+    }
+
+    stack->free(stack);
+}
+ 
 #endif /* _CYALLOC_H */
