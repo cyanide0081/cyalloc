@@ -7,7 +7,6 @@
 #include <stdarg.h>  // va_args
 #include <string.h>  // memcpy and memset
 #include <assert.h>  // assertions
-#include <math.h>
 
 #define CA_DEFAULT_ALIGNMENT (2 * sizeof(void*))
 
@@ -454,6 +453,7 @@ static inline Stack *stack_init(
     if (backing_allocator == NULL && backing_deallocator == NULL) {
         backing_allocator = page_alloc;
         backing_deallocator = page_free; 
+        initial_size = _ca_mem_align_forward(initial_size, CA_PAGE_SIZE);
     } else if (backing_allocator == NULL || backing_deallocator == NULL) {
         return NULL;
     }
@@ -488,10 +488,12 @@ static inline StackNode *_ca_stack_insert_node(Stack *stack, size_t size) {
     new_node->next = stack->state->first_node;
     stack->state->first_node = new_node;
 
-    return cur_node;
+    return new_node;
 }
 
 void *stack_alloc_align(Stack *stack, size_t size, size_t align) {
+    if (stack == NULL) return NULL;
+
     StackHeader *header;    
     StackNode *cur_node = stack->state->first_node;
     uintptr_t cur_address = (uintptr_t)(cur_node->buf + cur_node->offset);
@@ -534,16 +536,20 @@ void stack_free(Stack *stack, void *ptr) {
     uintptr_t end = start + (uintptr_t)cur_node->size;
     uintptr_t cur_address = (uintptr_t)ptr;
     if (!(start <= cur_address && cur_address < end)) {
-        /* out of bounds */
+        assert(0 && "out-of-bounds pointer deallocation (stack_free())");
         return;
     }
     if (cur_address >= start + (uintptr_t)cur_node->offset) {
-        /* double-free */
+        /* allow double-frees */
         return;
     }
 
     StackHeader *header = (StackHeader*)(cur_address - sizeof(*header));
     size_t prev_offset = (size_t)(cur_address - header->padding - start);
+    if (prev_offset != header->prev_offset) {
+        assert(0 && "out-of-order stack deallocation (stack_free())");
+        return;
+    }
     cur_node->offset = prev_offset;
     cur_node->prev_offset = header->prev_offset;
 }
@@ -567,11 +573,11 @@ void *stack_realloc_align(
     uintptr_t end = start + cur_node->size;
     uintptr_t cur_address = (uintptr_t)ptr;
     if (!(start <= cur_address && cur_address < end)) {
-        /* out of bounds */
+        assert(0 && "out-of-bounds stack reallocation (stack_realloc())");
         return NULL;
     }
     if (cur_address >= start + (uintptr_t)cur_node->offset) {
-        /* not the last allocation */
+        assert(0 && "out-of-order stack reallocation (stack_realloc())");
         return NULL;
     }
 
@@ -616,7 +622,7 @@ void *stack_realloc(Stack *stack, void *ptr, size_t old_size, size_t new_size) {
 
 void stack_deinit(Stack *stack) {
     StackNode *cur_node = stack->state->first_node, *next = cur_node->next;
-    while (cur_node != NULL) {
+    while (next != NULL) {
         stack->free(cur_node);
         cur_node = next;
         next = next->next;

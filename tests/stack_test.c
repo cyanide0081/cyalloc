@@ -30,7 +30,7 @@ int main(void) {
     {
         txt_buf = stack_realloc(s, txt_buf, txt_size, expanded_size);
         if (txt_buf == NULL) {
-            print_e("unable to expand buffer in arena");
+            print_e("unable to expand buffer in stack");
             exit(EXIT_FAILURE);
         }
 
@@ -48,25 +48,36 @@ int main(void) {
         size_t shrunk_size = expanded_size / 4;
         txt_buf = stack_realloc(s, txt_buf, expanded_size, shrunk_size);
         if (txt_buf == NULL) {
-            print_e("unable to shrink buffer in arena");
+            print_e("unable to shrink buffer in stack");
             exit(EXIT_FAILURE);
         }
 
         print_s("shrunk message buffer (%.2lfKB)", shrunk_size / KB);
     }
+    
+#if 0 // figure out some error propagation strategy for the library
+    {
+        void *dummy = stack_alloc(s, 0x100);
+        stack_free(s, txt_buf);
+    }
+#endif
+    
     {
         size_t val = 69;
         StackNode *first_node = s->state->first_node;
         memset(first_node->buf, val, first_node->size);
         print_s("wrote [%zu] to stack (%.2lfKB)", val, first_node->size / KB);
     }
-    // {
-    //     const char *str = "basolutely.";
-    //     size_t str_len = strlen(str);
-    //     char *str_buf = stack_alloc_string(s, str, str_len);
-    //     print_s("allocated string into arena (str_buf: '%.*s')",
-    //         (int)str_len, str_buf);
-    // }
+
+#if 0 // stack_alloc_string not implemented
+    {
+        const char *str = "basolutely.";
+        size_t str_len = strlen(str);
+        char *str_buf = stack_alloc_string(s, str, str_len);
+        print_s("allocated string into arena (str_buf: '%.*s')",
+            (int)str_len, str_buf);
+    }
+#endif
 
     stack_deinit(s);
     print_s("deinitialized stack");
