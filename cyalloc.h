@@ -107,16 +107,16 @@ static inline void *page_alloc(size_t size) {
 
 /* Immediately returns the allocated memory starting @ [ptr] back to the OS */
 static inline void page_free(void *ptr) {
-#ifdef _WIN32
-    VirtualFree(ptr, 0, MEM_RELEASE);
-#else
     /* All allocated pages will have a metadata chunk right before the
      * beginning of the pointer that must be stepped back into
      * in order to free the whole block -> [*...[PageChunk][ptr]...] */
-    PageChunk *chunk = (PageChunk*)((char*)ptr - sizeof(*chunk));
-    const size_t chunk_aligned_size = 
-        _ca_mem_align_forward(sizeof(*chunk), chunk->align);
+    PageChunk* chunk = (PageChunk*)((char*)ptr - sizeof(*chunk));
 
+#ifdef _WIN32
+    VirtualFree((void*)chunk, 0, MEM_RELEASE);
+#else
+    const size_t chunk_aligned_size =
+        _ca_mem_align_forward(sizeof(*chunk), chunk->align);
     munmap((char*)ptr - chunk_aligned_size, chunk->size);
 #endif
 }
@@ -135,16 +135,13 @@ static inline void *page_realloc_align(
     const size_t new_page_aligned_size = _ca_mem_align_forward(
         new_aligned_size + chunk_aligned_size, CA_PAGE_SIZE);
 
-    /* TODO: free excess pages if possible
-     * (free memory) starting at
-     * (current_size - new_aligned_size + chunk_aligned_size) */
     if (new_page_aligned_size <= current_size) {
-        size_t chunk_to_free = current_size - new_size - chunk_aligned_size;
+        size_t size_to_free = current_size - new_size - chunk_aligned_size;
 
 #ifdef _WIN32
-        VirtualFree((char*)ptr + new_size, chunk_to_free, MEM_RELEASE);
+        VirtualFree((char*)ptr + new_size, size_to_free, MEM_DECOMMIT);
 #else
-        munmap((char*)ptr + new_size, chunk_to_free);
+        munmap((char*)ptr + new_size, size_to_free);
 #endif
 
         chunk->size = new_page_aligned_size;
@@ -185,7 +182,9 @@ typedef struct ArenaNode {
 
 typedef struct ArenaState {
     ArenaNode *first_node;
-    size_t end_index;       // NOTE: not yet sure what this'll be used for
+#if 0 // probably won't even use this
+    size_t end_index;
+#endif
 } ArenaState;
 
 typedef struct Arena {
